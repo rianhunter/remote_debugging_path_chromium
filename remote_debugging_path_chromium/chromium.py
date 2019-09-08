@@ -18,9 +18,11 @@ from aiohttp import web
 
 import asyncio
 import json
+import re
 import socket
 import sys
 import os
+import uuid
 
 class ChromeError(Exception):
     def __init__(self, error_object):
@@ -84,6 +86,11 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
             if msg is None:
                 break
 
+            # event message meant for specific session
+            if msg.get("sessionId") is not None:
+                yield from sessions[msg.get("sessionId")].put(msg)
+                continue
+
             mid = msg.get("id")
             if mid is not None and mid in messages:
                 fut = messages.pop(mid)
@@ -111,6 +118,28 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
             url=target['url'],
             webSocketDebuggerUrl="ws:/devtools/page/%s" % (target['targetId'],),
         )
+
+    browser_uuid = uuid.uuid4()
+    browser_debugger_path = '/devtools/browser/%s' % (browser_uuid,)
+
+    @asyncio.coroutine
+    def json_version(request):
+        res = yield from call_method('Browser.getVersion')
+
+        mo = re.search(r'AppleWebKit/(\d+)\.(\d+)', res['userAgent'])
+        if mo is not None:
+            webkit_version = '%s.%s (%s)' % (mo[1], mo[2], res['revision'],)
+        else:
+            webkit_version = '0.0 (%s)' % (res['revision'],)
+
+        return web.json_response({
+            'Browser': res['product'],
+            'Protocol-Version': res['protocolVersion'],
+            'User-Agent': res['userAgent'],
+            'V8-Version': res['jsVersion'],
+            'WebKit-Version': webkit_version,
+            'webSocketDebuggerUrl': 'ws:%s' % (browser_debugger_path,),
+        })
 
     @asyncio.coroutine
     def json_new(request):
@@ -163,9 +192,13 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
 
     @asyncio.coroutine
     def devtools_socket(request):
-        targetId = request.match_info['id']
-
-        res = yield from call_method('Target.attachToTarget', targetId=targetId)
+        if request.path == browser_debugger_path:
+            res = yield from call_method('Target.attachToBrowserTarget')
+            flat_mode = True
+        else:
+            targetId = request.match_info['id']
+            res = yield from call_method('Target.attachToTarget', targetId=targetId)
+            flat_mode = False
         sessionId = res['sessionId']
 
         session_queue = asyncio.Queue()
@@ -191,6 +224,7 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
                         # unhandled
                         break
 
+                    wmsg = None
                     if whitelist is not None:
                         wmsg = json.loads(msg.data)
                         method = wmsg.get("method")
@@ -205,16 +239,26 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
                             taskws = asyncio.create_task(ws.receive())
                             continue
 
-                    yield from call_method(
-                        'Target.sendMessageToTarget',
-                        message=msg.data,
-                        sessionId=sessionId,
-                    )
+                    if flat_mode:
+                        if wmsg is None:
+                            wmsg = json.loads(msg.data)
+                        wmsg['sessionId'] = sessionId
+
+                        writer.write(json.dumps(wmsg).encode('utf-8'))
+                        writer.write(b'\0')
+                        yield from writer.drain()
+                    else:
+                        yield from call_method(
+                            'Target.sendMessageToTarget',
+                            message=msg.data,
+                            sessionId=sessionId,
+                        )
 
                     taskws = asyncio.create_task(ws.receive())
 
                 if taskq in done:
                     tosend = yield from taskq
+                    tosend.pop("sessionId", None)
                     yield from ws.send_json(tosend)
                     taskq = asyncio.create_task(session_queue.get())
         finally:
@@ -224,10 +268,12 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
                 yield from ws.close()
 
     app.add_routes([
+        web.get("/json/version", json_version),
         web.get("/json/new", json_new),
         web.get("/json/list", json_list),
         web.get("/json/close/{id}", json_close),
         web.get("/devtools/page/{id}", devtools_socket),
+        web.get(browser_debugger_path, devtools_socket),
     ])
 
     dead_fut = asyncio.Future()
