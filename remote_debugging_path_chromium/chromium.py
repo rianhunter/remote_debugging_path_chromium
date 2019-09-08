@@ -84,6 +84,8 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
         while True:
             msg = yield from get_rdp_message(reader)
             if msg is None:
+                for sessionq in sessions.values():
+                    yield from sessionq.put(None)
                 break
 
             # event message meant for specific session
@@ -103,6 +105,10 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
                     sessionId = msg['params']["sessionId"]
                     if sessionId in sessions:
                         yield from sessions[sessionId].put(json.loads(msg['params']["message"]))
+                elif msg.get('method') == 'Target.detachedFromTarget':
+                    sessionId = msg['params']["sessionId"]
+                    if sessionId in sessions:
+                        yield from sessions[sessionId].put(None)
 
             # TODO: handle events
     asyncio.create_task(manage_pipe())
@@ -258,12 +264,19 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
 
                 if taskq in done:
                     tosend = yield from taskq
+                    if tosend is None:
+                        taskws.cancel()
+                        break
                     tosend.pop("sessionId", None)
                     yield from ws.send_json(tosend)
                     taskq = asyncio.create_task(session_queue.get())
         finally:
             del sessions[sessionId]
-            yield from call_method('Target.detachFromTarget', sessionId=sessionId)
+            try:
+                yield from call_method('Target.detachFromTarget', sessionId=sessionId)
+            except ChromeError as e:
+                if e.code != -32602:
+                    raise
             if ws is not None:
                 yield from ws.close()
 
