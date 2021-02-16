@@ -30,6 +30,14 @@ extra options:
       are allowed to be invoked through this interface. You can specify
       this multiple times.
 
+    - --remote-debugging-allow-expression=EXPR
+      A more powerful version of 'remote-debugging-allow'. You can
+      pass an arbitrary Python expressions as an argument and if
+      the expression evaluates to true then the method will be
+      allowed to be invoked. The message is available as the `msg`
+      variable. This is mainly to allow more fine-grained whitelist
+      access based on method arguments.
+
 Assuming your pip install location is on your PATH, you can invoke
 it like you would invoke chromium.
       

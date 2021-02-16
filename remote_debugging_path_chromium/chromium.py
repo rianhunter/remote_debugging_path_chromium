@@ -233,8 +233,13 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
                     wmsg = None
                     if whitelist is not None:
                         wmsg = json.loads(msg.data)
-                        method = wmsg.get("method")
-                        if method not in whitelist:
+
+                        # evaluate each whitelist expression
+                        # to check if it matches
+                        for expr in whitelist:
+                            if eval(expr, {}, dict(msg=wmsg)):
+                                break
+                        else:
                             yield from ws.send_json(dict(
                                 id=wmsg['id'],
                                 error=dict(
@@ -313,12 +318,16 @@ def start_with_unix_path(whitelist, unix_path, argv, csock):
         if not waited:
             chrome_proc.terminate()
 
+def whitelist_method_to_expr(method_name):
+    return 'msg.get("method") == %r' % (method_name,)
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv
 
     whitelist = None
 
+    waiting_for_whitelist_expression = False
     waiting_for_whitelist = False
     waiting_for_path = False
     unix_path = None
@@ -335,8 +344,15 @@ def main(argv=None):
         if waiting_for_whitelist:
             if whitelist is None:
                 whitelist = []
-            whitelist.append(value)
+            whitelist.append(whitelist_method_to_expr(value))
             waiting_for_whitelist = False
+            continue
+
+        if waiting_for_whitelist_expression:
+            if whitelist is None:
+                whitelist = []
+            whitelist.append(value)
+            waiting_for_whitelist_expression = False
             continue
 
         if value == "--remote-debugging-path":
@@ -350,7 +366,15 @@ def main(argv=None):
         elif value.startswith("--remote-debugging-allow="):
             if whitelist is None:
                 whitelist = []
-            whitelist.append(value[len("--remote-debugging-allow="):])
+            whitelist.append(whitelist_method_to_expr(value[len("--remote-debugging-allow="):]))
+            to_delete.append([idx, idx + 1])
+
+        if value == "--remote-debugging-allow-expression":
+            waiting_for_whitelist_expression = True
+        elif value.startswith("--remote-debugging-allow-expression="):
+            if whitelist is None:
+                whitelist = []
+            whitelist.append(value[len("--remote-debugging-allow-expression="):])
             to_delete.append([idx, idx + 1])
 
     if unix_path is not None:
